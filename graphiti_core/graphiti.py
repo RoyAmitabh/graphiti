@@ -616,6 +616,7 @@ class Graphiti:
         reference_time: datetime,
         source: EpisodeType = EpisodeType.message,
         group_id: str | None = None,
+        username: str | None = None,
         uuid: str | None = None,
         update_communities: bool = False,
         entity_types: dict[str, type[BaseModel]] | None = None,
@@ -644,6 +645,8 @@ class Graphiti:
             The type of the episode. Defaults to EpisodeType.message.
         group_id : str | None
             An id for the graph partition the episode is a part of.
+        username : str | None
+            Username of the user who created this episode.
         uuid : str | None
             Optional uuid of the episode.
         update_communities : bool
@@ -710,6 +713,7 @@ class Graphiti:
                     else EpisodicNode(
                         name=name,
                         group_id=group_id,
+                        username=username,
                         labels=[],
                         source=source,
                         content=episode_body,

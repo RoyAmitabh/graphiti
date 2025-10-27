@@ -12,18 +12,18 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any, cast
 
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+
+from typing_extensions import TypedDict
+
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from openai import AsyncAzureOpenAI
 from pydantic import BaseModel, Field
-from typing_extensions import TypedDict
 
 from graphiti_core import Graphiti
-from graphiti_core.driver.neo4j_driver import Neo4jDriver
 from graphiti_core.edges import EntityEdge
 from graphiti_core.embedder.azure_openai import AzureOpenAIEmbedderClient
-from graphiti_core.embedder.client import EmbedderClient
+from graphiti_core.embedder.client import EmbedderClient, EmbedderConfig
 from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.llm_client import LLMClient
 from graphiti_core.llm_client.azure_openai_client import AzureOpenAILLMClient
@@ -48,6 +48,81 @@ DEFAULT_EMBEDDER_MODEL = 'text-embedding-3-small'
 # Decrease this if you're experiencing 429 rate limit errors from your LLM provider.
 # Increase if you have high rate limits.
 SEMAPHORE_LIMIT = int(os.getenv('SEMAPHORE_LIMIT', 10))
+
+
+# Hugging Face Embedder Implementation
+class HuggingFaceEmbedderConfig(EmbedderConfig):
+    """Configuration for Hugging Face embedder."""
+    model_name: str = os.getenv('HUGGINGFACE_MODEL_NAME', "sentence-transformers/all-MiniLM-L6-v2")
+    device: str = os.getenv('HUGGINGFACE_DEVICE',"cpu")
+    max_length: int(os.getenv('HUGGINGFACE_EMBEDDING_DIM'))
+
+
+class HuggingFaceEmbedder(EmbedderClient):
+    """Custom embedder using Hugging Face sentence-transformers models."""
+    
+    def __init__(self, config: HuggingFaceEmbedderConfig):
+        self.config = config
+        
+        # Lazy import to avoid requiring these dependencies if not using HF
+        try:
+            import torch
+            from sentence_transformers import SentenceTransformer
+        except ImportError:
+            raise ImportError(
+                "Hugging Face embedder requires 'sentence-transformers' and 'torch'. "
+                "Install with: pip install sentence-transformers torch"
+            )
+        
+        self.device = torch.device(config.device)
+        
+        # Load the model
+        logger.info(f"Loading Hugging Face model: {config.model_name}")
+        self.model = SentenceTransformer(config.model_name, device=config.device)
+        logger.info(f"Model loaded successfully on {config.device}")
+    
+    async def create(self, input_data: str | list[str] | Any) -> list[float]:
+        """Create embeddings for input data."""
+        if isinstance(input_data, str):
+            input_list = [input_data]
+        elif isinstance(input_data, list):
+            input_list = [str(item) for item in input_data if item]
+        else:
+            input_list = [str(input_data)]
+        
+        if not input_list:
+            return []
+        
+        # Generate embeddings
+        embeddings = self.model.encode(
+            input_list,
+            convert_to_tensor=True,
+            show_progress_bar=False
+        )
+        
+        # Convert to list of floats and truncate to embedding_dim
+        result = embeddings[0].cpu().numpy().tolist()
+        return result[:self.config.embedding_dim]
+    
+    async def create_batch(self, input_data_list: list[str]) -> list[list[float]]:
+        """Create embeddings for a batch of input data."""
+        if not input_data_list:
+            return []
+        
+        # Generate embeddings for all inputs at once
+        embeddings = self.model.encode(
+            input_data_list,
+            convert_to_tensor=True,
+            show_progress_bar=False
+        )
+        
+        # Convert to list of lists and truncate to embedding_dim
+        results = []
+        for embedding in embeddings:
+            result = embedding.cpu().numpy().tolist()
+            results.append(result[:self.config.embedding_dim])
+        
+        return results
 
 
 class Requirement(BaseModel):
@@ -145,6 +220,7 @@ class NodeResult(TypedDict):
     summary: str
     labels: list[str]
     group_id: str
+    username: str | None
     created_at: str
     attributes: dict[str, Any]
 
@@ -170,6 +246,18 @@ class StatusResponse(TypedDict):
 
 
 def create_azure_credential_token_provider() -> Callable[[], str]:
+    """Create Azure credential token provider for managed identity authentication.
+    
+    This function lazy-loads the azure-identity package only when needed.
+    """
+    try:
+        from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+    except ImportError:
+        raise ImportError(
+            "Azure managed identity requires 'azure-identity' package. "
+            "Install with: pip install azure-identity"
+        )
+    
     credential = DefaultAzureCredential()
     token_provider = get_bearer_token_provider(
         credential, 'https://cognitiveservices.azure.com/.default'
@@ -177,17 +265,7 @@ def create_azure_credential_token_provider() -> Callable[[], str]:
     return token_provider
 
 
-# Server configuration classes
-# The configuration system has a hierarchy:
-# - GraphitiConfig is the top-level configuration
-#   - LLMConfig handles all OpenAI/LLM related settings
-#   - EmbedderConfig manages embedding settings
-#   - Neo4jConfig manages database connection details
-#   - Various other settings like group_id and feature flags
-# Configuration values are loaded from:
-# 1. Default values in the class definitions
-# 2. Environment variables (loaded via load_dotenv())
-# 3. Command line arguments (which override environment variables)
+
 class GraphitiLLMConfig(BaseModel):
     """Configuration for the LLM client.
 
@@ -214,9 +292,9 @@ class GraphitiLLMConfig(BaseModel):
         small_model_env = os.environ.get('SMALL_MODEL_NAME', '')
         small_model = small_model_env if small_model_env.strip() else SMALL_LLM_MODEL
 
-        azure_openai_endpoint = os.environ.get('AZURE_OPENAI_ENDPOINT', None)
+        azure_openai_endpoint = os.environ.get('AZURE_OPENAI_LLM_ENDPOINT', None)
         azure_openai_api_version = os.environ.get('AZURE_OPENAI_API_VERSION', None)
-        azure_openai_deployment_name = os.environ.get('AZURE_OPENAI_DEPLOYMENT_NAME', None)
+        azure_openai_deployment_name = os.environ.get('AZURE_OPENAI_LLM_DEPLOYMENT', None)
         azure_openai_use_managed_identity = (
             os.environ.get('AZURE_OPENAI_USE_MANAGED_IDENTITY', 'false').lower() == 'true'
         )
@@ -234,7 +312,7 @@ class GraphitiLLMConfig(BaseModel):
                 )
 
             return cls(
-                api_key=os.environ.get('OPENAI_API_KEY'),
+                api_key=os.environ.get('AZURE_OPENAI_API_KEY'),
                 model=model,
                 small_model=small_model,
                 temperature=float(os.environ.get('LLM_TEMPERATURE', '0.0')),
@@ -243,12 +321,12 @@ class GraphitiLLMConfig(BaseModel):
             # Setup for Azure OpenAI API
             # Log if empty deployment name was provided
             if azure_openai_deployment_name is None:
-                logger.error('AZURE_OPENAI_DEPLOYMENT_NAME environment variable not set')
+                logger.error('AZURE_OPENAI_LLM_DEPLOYMENT environment variable not set')
 
-                raise ValueError('AZURE_OPENAI_DEPLOYMENT_NAME environment variable not set')
+                raise ValueError('AZURE_OPENAI_LLM_DEPLOYMENT environment variable not set')
             if not azure_openai_use_managed_identity:
                 # api key
-                api_key = os.environ.get('OPENAI_API_KEY', None)
+                api_key = os.environ.get('AZURE_OPENAI_API_KEY', None)
             else:
                 # Managed identity
                 api_key = None
@@ -352,6 +430,7 @@ class GraphitiEmbedderConfig(BaseModel):
     """Configuration for the embedder client.
 
     Centralizes all embedding-related configuration parameters.
+    Supports OpenAI, Azure OpenAI, and Hugging Face embedders.
     """
 
     model: str = DEFAULT_EMBEDDER_MODEL
@@ -360,10 +439,35 @@ class GraphitiEmbedderConfig(BaseModel):
     azure_openai_deployment_name: str | None = None
     azure_openai_api_version: str | None = None
     azure_openai_use_managed_identity: bool = False
+    # Hugging Face configuration
+    use_huggingface: bool = False
+    huggingface_model_name: str | None = None
+    huggingface_embedding_dim: int = 384
+    huggingface_device: str = 'cpu'
 
     @classmethod
     def from_env(cls) -> 'GraphitiEmbedderConfig':
         """Create embedder configuration from environment variables."""
+
+        # Check if Hugging Face embedder is requested
+        use_huggingface = os.environ.get('USE_HUGGINGFACE_EMBEDDER', 'false').lower() == 'true'
+        
+        if use_huggingface:
+            # Setup for Hugging Face embedder
+            huggingface_model_name = os.environ.get('HUGGINGFACE_MODEL_NAME', 'sentence-transformers/all-MiniLM-L6-v2')
+            huggingface_embedding_dim = int(os.environ.get('HUGGINGFACE_EMBEDDING_DIM', '384'))
+            huggingface_device = os.environ.get('HUGGINGFACE_DEVICE', 'cpu')
+            
+            logger.info(f'Using Hugging Face embedder: {huggingface_model_name}')
+            logger.info(f'Embedding dimension: {huggingface_embedding_dim}')
+            logger.info(f'Device: {huggingface_device}')
+            
+            return cls(
+                use_huggingface=True,
+                huggingface_model_name=huggingface_model_name,
+                huggingface_embedding_dim=huggingface_embedding_dim,
+                huggingface_device=huggingface_device,
+            )
 
         # Get model from environment, or use default if not set or empty
         model_env = os.environ.get('EMBEDDER_MODEL_NAME', '')
@@ -413,6 +517,16 @@ class GraphitiEmbedderConfig(BaseModel):
             )
 
     def create_client(self) -> EmbedderClient | None:
+        # Check if Hugging Face embedder is requested
+        if self.use_huggingface:
+            logger.info('Creating Hugging Face embedder client')
+            hf_config = HuggingFaceEmbedderConfig(
+                model_name=self.huggingface_model_name or "sentence-transformers/all-MiniLM-L6-v2",
+                device=self.huggingface_device,
+                embedding_dim=self.huggingface_embedding_dim,
+            )
+            return HuggingFaceEmbedder(config=hf_config)
+        
         if self.azure_openai_endpoint is not None:
             # Azure OpenAI API setup
             if self.azure_openai_use_managed_identity:
@@ -468,23 +582,6 @@ class Neo4jConfig(BaseModel):
         )
 
 
-class FalkorConfig(BaseModel):
-    """Configuration for FalkorDB database connection."""
-
-    host: str = 'localhost'
-    port: int = 6379
-    user: str = ''
-    password: str = ''
-
-    @classmethod
-    def from_env(cls) -> 'FalkorConfig':
-        host = os.environ.get('FALKORDB_HOST', 'localhost')
-        port = int(os.environ.get('FALKORDB_PORT', 6379))
-        user = os.environ.get('FALKORDB_USER', '')
-        password = os.environ.get('FALKORDB_PASSWORD', '')
-        return cls(host=host, port=port, user=user, password=password)
-
-
 class GraphitiConfig(BaseModel):
     """Configuration for Graphiti client.
 
@@ -494,37 +591,25 @@ class GraphitiConfig(BaseModel):
     llm: GraphitiLLMConfig = Field(default_factory=GraphitiLLMConfig)
     embedder: GraphitiEmbedderConfig = Field(default_factory=GraphitiEmbedderConfig)
     neo4j: Neo4jConfig = Field(default_factory=Neo4jConfig)
-    falkordb: FalkorConfig = Field(default_factory=FalkorConfig)
-
     group_id: str | None = None
+    username: str | None = None
     use_custom_entities: bool = False
     destroy_graph: bool = False
-    database_type: str = 'neo4j'
 
     @classmethod
     def from_env(cls) -> 'GraphitiConfig':
         """Create a configuration instance from environment variables."""
-        db_type = os.environ.get('DATABASE_TYPE')
-        if not db_type:
-            raise ValueError(
-                'DATABASE_TYPE environment variable must be set (e.g., "neo4j" or "falkordb")'
-            )
-        if db_type == 'neo4j':
-            return cls(
-                llm=GraphitiLLMConfig.from_env(),
-                embedder=GraphitiEmbedderConfig.from_env(),
-                neo4j=Neo4jConfig.from_env(),
-                database_type=db_type,
-            )
-        elif db_type == 'falkordb':
-            return cls(
-                llm=GraphitiLLMConfig.from_env(),
-                embedder=GraphitiEmbedderConfig.from_env(),
-                falkordb=FalkorConfig.from_env(),
-                database_type=db_type,
-            )
-        else:
-            raise ValueError(f'Unsupported DATABASE_TYPE: {db_type}')
+        # Read DEFAULT_GROUP_ID and DEFAULT_USERNAME from environment
+        group_id = os.environ.get('DEFAULT_GROUP_ID')
+        username = os.environ.get('DEFAULT_USERNAME')
+        
+        return cls(
+            llm=GraphitiLLMConfig.from_env(),
+            embedder=GraphitiEmbedderConfig.from_env(),
+            neo4j=Neo4jConfig.from_env(),
+            group_id=group_id,
+            username=username,
+        )
 
     @classmethod
     def from_cli_and_env(cls, args: argparse.Namespace) -> 'GraphitiConfig':
@@ -532,11 +617,14 @@ class GraphitiConfig(BaseModel):
         # Start with environment configuration
         config = cls.from_env()
 
-        # Apply CLI overrides
+        # Apply CLI overrides for group_id
+        # Priority: CLI args > environment variable > 'default'
         if args.group_id:
             config.group_id = args.group_id
-        else:
+        elif config.group_id is None:
+            # No CLI arg and no env variable, use default
             config.group_id = 'default'
+        # Otherwise, use the value from environment (already set in from_env)
 
         config.use_custom_entities = args.use_custom_entities
         config.destroy_graph = args.destroy_graph
@@ -593,6 +681,10 @@ Key capabilities:
 The server connects to a database for persistent storage and uses language models for certain operations. 
 Each piece of information is organized by group_id, allowing you to maintain separate knowledge domains.
 
+Configuration:
+- DEFAULT_GROUP_ID: Set via environment variable to organize memories by workspace/project
+- DEFAULT_USERNAME: Set via environment variable to identify the user for personalized memory storage
+
 When adding information, provide descriptive names and detailed content to improve search quality. 
 When searching, use specific queries and consider filtering by group_id for more relevant results.
 
@@ -625,43 +717,57 @@ async def initialize_graphiti():
         if not config.neo4j.uri or not config.neo4j.user or not config.neo4j.password:
             raise ValueError('NEO4J_URI, NEO4J_USER, and NEO4J_PASSWORD must be set')
 
-        # Validate FalkorDB configuration
-        if config.database_type == 'falkordb' and (
-            not config.falkordb.host or not config.falkordb.port
-        ):
-            raise ValueError('FALKORDB_HOST and FALKORDB_PORT must be set for FalkorDB')
-
         embedder_client = config.embedder.create_client()
-
-        # Construct the driver based on the database_type
-        driver = None
-        if config.database_type == 'neo4j':
-            driver = Neo4jDriver(
-                uri=config.neo4j.uri,
-                user=config.neo4j.user,
-                password=config.neo4j.password,
-            )
-        elif config.database_type == 'falkordb':
-            from graphiti_core.driver.falkordb_driver import FalkorDriver
-
-            host = config.falkordb.host if hasattr(config.falkordb, 'host') else 'localhost'
-            port = int(config.falkordb.port) if hasattr(config.falkordb, 'port') else 6379
-            username = config.falkordb.user or None
-            password = config.falkordb.password or None
-            driver = FalkorDriver(
-                host=host,
-                port=port,
-                username=username,
-                password=password,
-            )
-        else:
-            raise ValueError(f'Unsupported database type: {config.database_type}')
+        
+        # Create cross-encoder (reranker) if using Azure OpenAI
+        cross_encoder = None
+        if config.llm.azure_openai_endpoint is not None:
+            # Use Azure OpenAI for reranking
+            try:
+                from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
+                
+                # Create Azure OpenAI client for reranking
+                if config.llm.azure_openai_use_managed_identity:
+                    token_provider = create_azure_credential_token_provider()
+                    reranker_client = AsyncAzureOpenAI(
+                        azure_endpoint=config.llm.azure_openai_endpoint,
+                        azure_deployment=config.llm.azure_openai_deployment_name,
+                        api_version=config.llm.azure_openai_api_version,
+                        azure_ad_token_provider=token_provider,
+                    )
+                elif config.llm.api_key:
+                    reranker_client = AsyncAzureOpenAI(
+                        azure_endpoint=config.llm.azure_openai_endpoint,
+                        azure_deployment=config.llm.azure_openai_deployment_name,
+                        api_version=config.llm.azure_openai_api_version,
+                        api_key=config.llm.api_key,
+                    )
+                else:
+                    reranker_client = None
+                
+                if reranker_client:
+                    from graphiti_core.llm_client.config import LLMConfig
+                    reranker_config = LLMConfig(
+                        api_key=config.llm.api_key,
+                        model=config.llm.model,
+                    )
+                    cross_encoder = OpenAIRerankerClient(
+                        config=reranker_config,
+                        client=reranker_client
+                    )
+                    logger.info('Azure OpenAI reranker initialized')
+            except Exception as e:
+                logger.warning(f'Could not initialize Azure OpenAI reranker: {e}')
+                logger.info('Continuing without reranker - search quality may be reduced')
 
         # Initialize Graphiti client
         graphiti_client = Graphiti(
-            graph_driver=driver,
+            uri=config.neo4j.uri,
+            user=config.neo4j.user,
+            password=config.neo4j.password,
             llm_client=llm_client,
             embedder=embedder_client,
+            cross_encoder=cross_encoder,  # Pass cross_encoder (can be None)
             max_coroutines=SEMAPHORE_LIMIT,
         )
 
@@ -672,7 +778,7 @@ async def initialize_graphiti():
 
         # Initialize the graph database with Graphiti's indices
         await graphiti_client.build_indices_and_constraints()
-        logger.info(f'Graphiti client initialized successfully with {config.database_type}')
+        logger.info('Graphiti client initialized successfully')
 
         # Log configuration details for transparency
         if llm_client:
@@ -682,7 +788,6 @@ async def initialize_graphiti():
             logger.info('No LLM client configured - entity extraction will be limited')
 
         logger.info(f'Using group_id: {config.group_id}')
-        logger.info(f'Using database type: {config.database_type}')
         logger.info(
             f'Custom entity extraction: {"enabled" if config.use_custom_entities else "disabled"}'
         )
@@ -721,105 +826,227 @@ episode_queues: dict[str, asyncio.Queue] = {}
 queue_workers: dict[str, bool] = {}
 
 
-async def process_episode_queue(group_id: str):
-    """Process episodes for a specific group_id sequentially.
+# async def process_episode_queue(group_id: str):
+#     """Process episodes for a specific group_id sequentially.
 
-    This function runs as a long-lived task that processes episodes
-    from the queue one at a time.
-    """
-    global queue_workers
+#     This function runs as a long-lived task that processes episodes
+#     from the queue one at a time.
+#     """
+#     global queue_workers
 
-    logger.info(f'Starting episode queue worker for group_id: {group_id}')
-    queue_workers[group_id] = True
+#     logger.info(f'Starting episode queue worker for group_id: {group_id}')
+#     queue_workers[group_id] = True
 
-    try:
-        while True:
-            # Get the next episode processing function from the queue
-            # This will wait if the queue is empty
-            process_func = await episode_queues[group_id].get()
+#     try:
+#         while True:
+#             # Get the next episode processing function from the queue
+#             # This will wait if the queue is empty
+#             process_func = await episode_queues[group_id].get()
 
-            try:
-                # Process the episode
-                await process_func()
-            except Exception as e:
-                logger.error(f'Error processing queued episode for group_id {group_id}: {str(e)}')
-            finally:
-                # Mark the task as done regardless of success/failure
-                episode_queues[group_id].task_done()
-    except asyncio.CancelledError:
-        logger.info(f'Episode queue worker for group_id {group_id} was cancelled')
-    except Exception as e:
-        logger.error(f'Unexpected error in queue worker for group_id {group_id}: {str(e)}')
-    finally:
-        queue_workers[group_id] = False
-        logger.info(f'Stopped episode queue worker for group_id: {group_id}')
+#             try:
+#                 # Process the episode
+#                 await process_func()
+#             except Exception as e:
+#                 logger.error(f'Error processing queued episode for group_id {group_id}: {str(e)}')
+#             finally:
+#                 # Mark the task as done regardless of success/failure
+#                 episode_queues[group_id].task_done()
+#     except asyncio.CancelledError:
+#         logger.info(f'Episode queue worker for group_id {group_id} was cancelled')
+#     except Exception as e:
+#         logger.error(f'Unexpected error in queue worker for group_id {group_id}: {str(e)}')
+#     finally:
+#         queue_workers[group_id] = False
+#         logger.info(f'Stopped episode queue worker for group_id: {group_id}')
+
+
+# @mcp.tool()
+# async def add_memory(
+#     name: str,
+#     episode_body: str,
+#     group_id: str | None = None,
+#     source: str = 'text',
+#     source_description: str = '',
+#     uuid: str | None = None,
+# ) -> SuccessResponse | ErrorResponse:
+#     """Add an episode to memory. This is the primary way to add information to the graph.
+
+#     This function returns immediately and processes the episode addition in the background.
+#     Episodes for the same group_id are processed sequentially to avoid race conditions.
+
+#     Args:
+#         name (str): Name of the episode
+#         episode_body (str): The content of the episode to persist to memory. When source='json', this must be a
+#                            properly escaped JSON string, not a raw Python dictionary. The JSON data will be
+#                            automatically processed to extract entities and relationships.
+#         group_id (str, optional): A unique ID for this graph. If not provided, uses the default group_id from CLI
+#                                  or a generated one.
+#         source (str, optional): Source type, must be one of:
+#                                - 'text': For plain text content (default)
+#                                - 'json': For structured data
+#                                - 'message': For conversation-style content
+#         source_description (str, optional): Description of the source
+#         uuid (str, optional): Optional UUID for the episode
+
+#     Examples:
+#         # Adding plain text content
+#         add_memory(
+#             name="Company News",
+#             episode_body="Acme Corp announced a new product line today.",
+#             source="text",
+#             source_description="news article",
+#             group_id="some_arbitrary_string"
+#         )
+
+#         # Adding structured JSON data
+#         # NOTE: episode_body must be a properly escaped JSON string. Note the triple backslashes
+#         add_memory(
+#             name="Customer Profile",
+#             episode_body="{\\\"company\\\": {\\\"name\\\": \\\"Acme Technologies\\\"}, \\\"products\\\": [{\\\"id\\\": \\\"P001\\\", \\\"name\\\": \\\"CloudSync\\\"}, {\\\"id\\\": \\\"P002\\\", \\\"name\\\": \\\"DataMiner\\\"}]}",
+#             source="json",
+#             source_description="CRM data"
+#         )
+
+#         # Adding message-style content
+#         add_memory(
+#             name="Customer Conversation",
+#             episode_body="user: What's your return policy?\nassistant: You can return items within 30 days.",
+#             source="message",
+#             source_description="chat transcript",
+#             group_id="some_arbitrary_string"
+#         )
+
+#     Notes:
+#         When using source='json':
+#         - The JSON must be a properly escaped string, not a raw Python dictionary
+#         - The JSON will be automatically processed to extract entities and relationships
+#         - Complex nested structures are supported (arrays, nested objects, mixed data types), but keep nesting to a minimum
+#         - Entities will be created from appropriate JSON properties
+#         - Relationships between entities will be established based on the JSON structure
+#     """
+#     global graphiti_client, episode_queues, queue_workers
+
+#     if graphiti_client is None:
+#         return ErrorResponse(error='Graphiti client not initialized')
+
+#     try:
+#         # Map string source to EpisodeType enum
+#         source_type = EpisodeType.text
+#         if source.lower() == 'message':
+#             source_type = EpisodeType.message
+#         elif source.lower() == 'json':
+#             source_type = EpisodeType.json
+
+#         # Use the provided group_id or fall back to the default from config
+#         effective_group_id = group_id if group_id is not None else config.group_id
+
+#         # Cast group_id to str to satisfy type checker
+#         # The Graphiti client expects a str for group_id, not Optional[str]
+#         group_id_str = str(effective_group_id) if effective_group_id is not None else ''
+
+#         # We've already checked that graphiti_client is not None above
+#         # This assert statement helps type checkers understand that graphiti_client is defined
+#         assert graphiti_client is not None, 'graphiti_client should not be None here'
+
+#         # Use cast to help the type checker understand that graphiti_client is not None
+#         client = cast(Graphiti, graphiti_client)
+
+#         # Define the episode processing function
+#         async def process_episode():
+#             try:
+#                 logger.info(f"Processing queued episode '{name}' for group_id: {group_id_str}")
+#                 # Use all entity types if use_custom_entities is enabled, otherwise use empty dict
+#                 entity_types = ENTITY_TYPES if config.use_custom_entities else {}
+
+#                 await client.add_episode(
+#                     name=name,
+#                     episode_body=episode_body,
+#                     source=source_type,
+#                     source_description=source_description,
+#                     group_id=group_id_str,  # Using the string version of group_id
+#                     uuid=uuid,
+#                     reference_time=datetime.now(timezone.utc),
+#                     entity_types=entity_types,
+#                 )
+#                 logger.info(f"Episode '{name}' added successfully")
+
+#                 logger.info(f"Episode '{name}' processed successfully")
+#             except Exception as e:
+#                 error_msg = str(e)
+#                 logger.error(
+#                     f"Error processing episode '{name}' for group_id {group_id_str}: {error_msg}"
+#                 )
+
+#         # Initialize queue for this group_id if it doesn't exist
+#         if group_id_str not in episode_queues:
+#             episode_queues[group_id_str] = asyncio.Queue()
+
+#         # Add the episode processing function to the queue
+#         await episode_queues[group_id_str].put(process_episode)
+
+#         # Start a worker for this queue if one isn't already running
+#         if not queue_workers.get(group_id_str, False):
+#             asyncio.create_task(process_episode_queue(group_id_str))
+
+#         # Return immediately with a success message
+#         return SuccessResponse(
+#             message=f"Episode '{name}' queued for processing (position: {episode_queues[group_id_str].qsize()})"
+#         )
+#     except Exception as e:
+#         error_msg = str(e)
+#         logger.error(f'Error queuing episode task: {error_msg}')
+#         return ErrorResponse(error=f'Error queuing episode task: {error_msg}')
 
 
 @mcp.tool()
-async def add_memory(
+async def add_memory_and_wait(
     name: str,
     episode_body: str,
-    group_id: str | None = None,
+    username: str,
+    group_id: str,
     source: str = 'text',
     source_description: str = '',
     uuid: str | None = None,
 ) -> SuccessResponse | ErrorResponse:
-    """Add an episode to memory. This is the primary way to add information to the graph.
+    """Add an episode to memory and WAIT for processing to complete before returning.
+    
+    Use this tool when you need immediate availability of the added information.
+    For better performance with multiple episodes, use add_memory() instead.
 
-    This function returns immediately and processes the episode addition in the background.
-    Episodes for the same group_id are processed sequentially to avoid race conditions.
+    This function will block until the episode has been fully processed and indexed,
+    ensuring that subsequent searches will find the newly added information.
 
     Args:
         name (str): Name of the episode
-        episode_body (str): The content of the episode to persist to memory. When source='json', this must be a
-                           properly escaped JSON string, not a raw Python dictionary. The JSON data will be
-                           automatically processed to extract entities and relationships.
-        group_id (str, optional): A unique ID for this graph. If not provided, uses the default group_id from CLI
-                                 or a generated one.
-        source (str, optional): Source type, must be one of:
-                               - 'text': For plain text content (default)
-                               - 'json': For structured data
-                               - 'message': For conversation-style content
+        episode_body (str): The content of the episode to persist to memory
+        username (str): Username of the user who created this episode (REQUIRED for multi-user server)
+        group_id (str): A unique ID for this graph/workspace (REQUIRED for multi-user server)
+        source (str, optional): Source type - 'text', 'json', or 'message' (default: 'text')
         source_description (str, optional): Description of the source
         uuid (str, optional): Optional UUID for the episode
 
     Examples:
-        # Adding plain text content
-        add_memory(
-            name="Company News",
-            episode_body="Acme Corp announced a new product line today.",
-            source="text",
-            source_description="news article",
-            group_id="some_arbitrary_string"
+        # Adding text to a user's workspace
+        add_memory_and_wait(
+            name="Team Update",
+            episode_body="Alice is now the lead frontend engineer.",
+            username="amchoudh",
+            group_id="AGENTICOS_CODE",
+            source="text"
         )
-
-        # Adding structured JSON data
-        # NOTE: episode_body must be a properly escaped JSON string. Note the triple backslashes
-        add_memory(
-            name="Customer Profile",
-            episode_body="{\\\"company\\\": {\\\"name\\\": \\\"Acme Technologies\\\"}, \\\"products\\\": [{\\\"id\\\": \\\"P001\\\", \\\"name\\\": \\\"CloudSync\\\"}, {\\\"id\\\": \\\"P002\\\", \\\"name\\\": \\\"DataMiner\\\"}]}",
-            source="json",
-            source_description="CRM data"
+        
+        # Adding structured information
+        add_memory_and_wait(
+            name="Project Requirement",
+            episode_body="The authentication system must support OAuth 2.0.",
+            username="amchoudh",
+            group_id="AGENTICOS_CODE",
+            source="text"
         )
-
-        # Adding message-style content
-        add_memory(
-            name="Customer Conversation",
-            episode_body="user: What's your return policy?\nassistant: You can return items within 30 days.",
-            source="message",
-            source_description="chat transcript",
-            group_id="some_arbitrary_string"
-        )
-
-    Notes:
-        When using source='json':
-        - The JSON must be a properly escaped string, not a raw Python dictionary
-        - The JSON will be automatically processed to extract entities and relationships
-        - Complex nested structures are supported (arrays, nested objects, mixed data types), but keep nesting to a minimum
-        - Entities will be created from appropriate JSON properties
-        - Relationships between entities will be established based on the JSON structure
+        
+        # Now you can immediately search for the stored information
     """
-    global graphiti_client, episode_queues, queue_workers
+    global graphiti_client
 
     if graphiti_client is None:
         return ErrorResponse(error='Graphiti client not initialized')
@@ -832,65 +1059,37 @@ async def add_memory(
         elif source.lower() == 'json':
             source_type = EpisodeType.json
 
-        # Use the provided group_id or fall back to the default from config
-        effective_group_id = group_id if group_id is not None else config.group_id
-
-        # Cast group_id to str to satisfy type checker
-        # The Graphiti client expects a str for group_id, not Optional[str]
-        group_id_str = str(effective_group_id) if effective_group_id is not None else ''
-
-        # We've already checked that graphiti_client is not None above
-        # This assert statement helps type checkers understand that graphiti_client is defined
         assert graphiti_client is not None, 'graphiti_client should not be None here'
-
-        # Use cast to help the type checker understand that graphiti_client is not None
         client = cast(Graphiti, graphiti_client)
 
-        # Define the episode processing function
-        async def process_episode():
-            try:
-                logger.info(f"Processing queued episode '{name}' for group_id: {group_id_str}")
-                # Use all entity types if use_custom_entities is enabled, otherwise use empty dict
-                entity_types = ENTITY_TYPES if config.use_custom_entities else {}
+        logger.info(f"Adding and processing episode '{name}' synchronously for group_id: {group_id}, username: {username}")
+        
+        # Use all entity types if use_custom_entities is enabled, otherwise use empty dict
+        entity_types = ENTITY_TYPES if config.use_custom_entities else {}
 
-                await client.add_episode(
-                    name=name,
-                    episode_body=episode_body,
-                    source=source_type,
-                    source_description=source_description,
-                    group_id=group_id_str,  # Using the string version of group_id
-                    uuid=uuid,
-                    reference_time=datetime.now(timezone.utc),
-                    entity_types=entity_types,
-                )
-                logger.info(f"Episode '{name}' added successfully")
-
-                logger.info(f"Episode '{name}' processed successfully")
-            except Exception as e:
-                error_msg = str(e)
-                logger.error(
-                    f"Error processing episode '{name}' for group_id {group_id_str}: {error_msg}"
-                )
-
-        # Initialize queue for this group_id if it doesn't exist
-        if group_id_str not in episode_queues:
-            episode_queues[group_id_str] = asyncio.Queue()
-
-        # Add the episode processing function to the queue
-        await episode_queues[group_id_str].put(process_episode)
-
-        # Start a worker for this queue if one isn't already running
-        if not queue_workers.get(group_id_str, False):
-            asyncio.create_task(process_episode_queue(group_id_str))
-
-        # Return immediately with a success message
-        return SuccessResponse(
-            message=f"Episode '{name}' queued for processing (position: {episode_queues[group_id_str].qsize()})"
+        # Process immediately and wait for completion
+        await client.add_episode(
+            name=name,
+            episode_body=episode_body,
+            source=source_type,
+            source_description=source_description,
+            group_id=group_id,
+            username=username,
+            uuid=uuid,
+            reference_time=datetime.now(timezone.utc),
+            entity_types=entity_types,
         )
+        
+        logger.info(f"Episode '{name}' processed and indexed successfully")
+        
+        return SuccessResponse(
+            message=f"Episode '{name}' added and processed successfully. Information is now searchable."
+        )
+        
     except Exception as e:
         error_msg = str(e)
-        logger.error(f'Error queuing episode task: {error_msg}')
-        return ErrorResponse(error=f'Error queuing episode task: {error_msg}')
+        logger.error(f"Error adding episode '{name}': {error_msg}")
+        return ErrorResponse(error=f'Error adding episode: {error_msg}')
 
 
 @mcp.tool()
@@ -908,7 +1107,8 @@ async def search_memory_nodes(
 
     Args:
         query: The search query
-        group_ids: Optional list of group IDs to filter results
+        group_ids: List of group IDs to filter results. For multi-user servers, ALWAYS provide this 
+                   to search only within the user's workspace (e.g., ["AGENTICOS_CODE"])
         max_nodes: Maximum number of nodes to return (default: 10)
         center_node_uuid: Optional UUID of a node to center the search around
         entity: Optional single entity type to filter results (permitted: "Preference", "Procedure")
@@ -961,6 +1161,7 @@ async def search_memory_nodes(
                 'summary': node.summary if hasattr(node, 'summary') else '',
                 'labels': node.labels if hasattr(node, 'labels') else [],
                 'group_id': node.group_id,
+                'username': node.username if hasattr(node, 'username') else None,
                 'created_at': node.created_at.isoformat(),
                 'attributes': node.attributes if hasattr(node, 'attributes') else {},
             }
@@ -985,7 +1186,8 @@ async def search_memory_facts(
 
     Args:
         query: The search query
-        group_ids: Optional list of group IDs to filter results
+        group_ids: List of group IDs to filter results. For multi-user servers, ALWAYS provide this 
+                   to search only within the user's workspace (e.g., ["AGENTICOS_CODE"])
         max_facts: Maximum number of facts to return (default: 10)
         center_node_uuid: Optional UUID of a node to center the search around
     """
@@ -1028,64 +1230,64 @@ async def search_memory_facts(
         return ErrorResponse(error=f'Error searching facts: {error_msg}')
 
 
-@mcp.tool()
-async def delete_entity_edge(uuid: str) -> SuccessResponse | ErrorResponse:
-    """Delete an entity edge from the graph memory.
+# @mcp.tool()
+# async def delete_entity_edge(uuid: str) -> SuccessResponse | ErrorResponse:
+#     """Delete an entity edge from the graph memory.
 
-    Args:
-        uuid: UUID of the entity edge to delete
-    """
-    global graphiti_client
+#     Args:
+#         uuid: UUID of the entity edge to delete
+#     """
+#     global graphiti_client
 
-    if graphiti_client is None:
-        return ErrorResponse(error='Graphiti client not initialized')
+#     if graphiti_client is None:
+#         return ErrorResponse(error='Graphiti client not initialized')
 
-    try:
-        # We've already checked that graphiti_client is not None above
-        assert graphiti_client is not None
+#     try:
+#         # We've already checked that graphiti_client is not None above
+#         assert graphiti_client is not None
 
-        # Use cast to help the type checker understand that graphiti_client is not None
-        client = cast(Graphiti, graphiti_client)
+#         # Use cast to help the type checker understand that graphiti_client is not None
+#         client = cast(Graphiti, graphiti_client)
 
-        # Get the entity edge by UUID
-        entity_edge = await EntityEdge.get_by_uuid(client.driver, uuid)
-        # Delete the edge using its delete method
-        await entity_edge.delete(client.driver)
-        return SuccessResponse(message=f'Entity edge with UUID {uuid} deleted successfully')
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f'Error deleting entity edge: {error_msg}')
-        return ErrorResponse(error=f'Error deleting entity edge: {error_msg}')
+#         # Get the entity edge by UUID
+#         entity_edge = await EntityEdge.get_by_uuid(client.driver, uuid)
+#         # Delete the edge using its delete method
+#         await entity_edge.delete(client.driver)
+#         return SuccessResponse(message=f'Entity edge with UUID {uuid} deleted successfully')
+#     except Exception as e:
+#         error_msg = str(e)
+#         logger.error(f'Error deleting entity edge: {error_msg}')
+#         return ErrorResponse(error=f'Error deleting entity edge: {error_msg}')
 
 
-@mcp.tool()
-async def delete_episode(uuid: str) -> SuccessResponse | ErrorResponse:
-    """Delete an episode from the graph memory.
+# @mcp.tool()
+# async def delete_episode(uuid: str) -> SuccessResponse | ErrorResponse:
+#     """Delete an episode from the graph memory.
 
-    Args:
-        uuid: UUID of the episode to delete
-    """
-    global graphiti_client
+#     Args:
+#         uuid: UUID of the episode to delete
+#     """
+#     global graphiti_client
 
-    if graphiti_client is None:
-        return ErrorResponse(error='Graphiti client not initialized')
+#     if graphiti_client is None:
+#         return ErrorResponse(error='Graphiti client not initialized')
 
-    try:
-        # We've already checked that graphiti_client is not None above
-        assert graphiti_client is not None
+#     try:
+#         # We've already checked that graphiti_client is not None above
+#         assert graphiti_client is not None
 
-        # Use cast to help the type checker understand that graphiti_client is not None
-        client = cast(Graphiti, graphiti_client)
+#         # Use cast to help the type checker understand that graphiti_client is not None
+#         client = cast(Graphiti, graphiti_client)
 
-        # Get the episodic node by UUID - EpisodicNode is already imported at the top
-        episodic_node = await EpisodicNode.get_by_uuid(client.driver, uuid)
-        # Delete the node using its delete method
-        await episodic_node.delete(client.driver)
-        return SuccessResponse(message=f'Episode with UUID {uuid} deleted successfully')
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f'Error deleting episode: {error_msg}')
-        return ErrorResponse(error=f'Error deleting episode: {error_msg}')
+#         # Get the episodic node by UUID - EpisodicNode is already imported at the top
+#         episodic_node = await EpisodicNode.get_by_uuid(client.driver, uuid)
+#         # Delete the node using its delete method
+#         await episodic_node.delete(client.driver)
+#         return SuccessResponse(message=f'Episode with UUID {uuid} deleted successfully')
+#     except Exception as e:
+#         error_msg = str(e)
+#         logger.error(f'Error deleting episode: {error_msg}')
+#         return ErrorResponse(error=f'Error deleting episode: {error_msg}')
 
 
 @mcp.tool()
@@ -1171,34 +1373,34 @@ async def get_episodes(
         return ErrorResponse(error=f'Error getting episodes: {error_msg}')
 
 
-@mcp.tool()
-async def clear_graph() -> SuccessResponse | ErrorResponse:
-    """Clear all data from the graph memory and rebuild indices."""
-    global graphiti_client
+# @mcp.tool()
+# async def clear_graph() -> SuccessResponse | ErrorResponse:
+#     """Clear all data from the graph memory and rebuild indices."""
+#     global graphiti_client
 
-    if graphiti_client is None:
-        return ErrorResponse(error='Graphiti client not initialized')
+#     if graphiti_client is None:
+#         return ErrorResponse(error='Graphiti client not initialized')
 
-    try:
-        # We've already checked that graphiti_client is not None above
-        assert graphiti_client is not None
+#     try:
+#         # We've already checked that graphiti_client is not None above
+#         assert graphiti_client is not None
 
-        # Use cast to help the type checker understand that graphiti_client is not None
-        client = cast(Graphiti, graphiti_client)
+#         # Use cast to help the type checker understand that graphiti_client is not None
+#         client = cast(Graphiti, graphiti_client)
 
-        # clear_data is already imported at the top
-        await clear_data(client.driver)
-        await client.build_indices_and_constraints()
-        return SuccessResponse(message='Graph cleared successfully and indices rebuilt')
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f'Error clearing graph: {error_msg}')
-        return ErrorResponse(error=f'Error clearing graph: {error_msg}')
+#         # clear_data is already imported at the top
+#         await clear_data(client.driver)
+#         await client.build_indices_and_constraints()
+#         return SuccessResponse(message='Graph cleared successfully and indices rebuilt')
+#     except Exception as e:
+#         error_msg = str(e)
+#         logger.error(f'Error clearing graph: {error_msg}')
+#         return ErrorResponse(error=f'Error clearing graph: {error_msg}')
 
 
 @mcp.resource('http://graphiti/status')
 async def get_status() -> StatusResponse:
-    """Get the status of the Graphiti MCP server and database connection."""
+    """Get the status of the Graphiti MCP server and Neo4j connection."""
     global graphiti_client
 
     if graphiti_client is None:
@@ -1212,15 +1414,14 @@ async def get_status() -> StatusResponse:
         client = cast(Graphiti, graphiti_client)
 
         # Test database connection
-        await client.driver.health_check()  # type: ignore  # type: ignore
+        await client.driver.client.verify_connectivity()  # type: ignore
 
         return StatusResponse(
-            status='ok',
-            message=f'Graphiti MCP server is running and connected to {config.database_type}',
+            status='ok', message='Graphiti MCP server is running and connected to Neo4j'
         )
     except Exception as e:
         error_msg = str(e)
-        logger.error(f'Error checking {config.database_type} connection: {error_msg}')
+        logger.error(f'Error checking Neo4j connection: {error_msg}')
         return StatusResponse(
             status='error',
             message=f'Graphiti MCP server is running but Neo4j connection failed: {error_msg}',
@@ -1268,17 +1469,6 @@ async def initialize_server() -> MCPConfig:
         default=os.environ.get('MCP_SERVER_HOST'),
         help='Host to bind the MCP server to (default: MCP_SERVER_HOST environment variable)',
     )
-    parser.add_argument(
-        '--port',
-        type=int,
-        default=int(os.environ.get('PORT', 8000)),
-        help='Port to run the MCP server on (default: 8000 or value of PORT env variable)',
-    )
-    parser.add_argument(
-        '--database-type',
-        choices=['neo4j', 'falkordb'],
-        help='Type of database to use (default: neo4j)',
-    )
 
     args = parser.parse_args()
 
@@ -1288,8 +1478,16 @@ async def initialize_server() -> MCPConfig:
     # Log the group ID configuration
     if args.group_id:
         logger.info(f'Using provided group_id: {config.group_id}')
+    elif os.environ.get('DEFAULT_GROUP_ID'):
+        logger.info(f'Using group_id from environment: {config.group_id}')
     else:
-        logger.info(f'Generated random group_id: {config.group_id}')
+        logger.info(f'Using default group_id: {config.group_id}')
+    
+    # Log the username configuration
+    if config.username:
+        logger.info(f'Using username from environment: {config.username}')
+    else:
+        logger.info('No username configured (DEFAULT_USERNAME environment variable not set)')
 
     # Log entity extraction configuration
     if config.use_custom_entities:
@@ -1304,11 +1502,6 @@ async def initialize_server() -> MCPConfig:
         logger.info(f'Setting MCP server host to: {args.host}')
         # Set MCP server host from CLI or env
         mcp.settings.host = args.host
-
-    if args.port:
-        logger.info(f'Setting MCP server port to: {args.port}')
-        # Set MCP server port from CLI or env
-        mcp.settings.port = args.port
 
     # Return MCP configuration
     return MCPConfig.from_cli(args)

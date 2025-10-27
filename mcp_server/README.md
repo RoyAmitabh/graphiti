@@ -57,15 +57,18 @@ cd graphiti && pwd
 
 `docker compose up`
 
+2.1. or start the service using command `python3 graphiti_mcp_server.py --transport sse`
+
 3. Point your MCP client to `http://localhost:8000/sse`
 
 ## Installation
 
 ### Prerequisites
 
-1. Ensure you have Python 3.10 or higher installed.
-2. A running Neo4j database (version 5.26 or later required)
-3. OpenAI API key for LLM operations
+1. Ensure you have Python 3.11.13 or higher installed.
+2. A running Neo4j database (version 6.0.2 or later required).
+3. Install the libraries mentioned in requirements.txt file under mcp_server directory.
+4. OpenAI API key for LLM operations.
 
 ### Setup
 
@@ -83,7 +86,11 @@ uv sync
 ## Configuration
 
 The server supports both Neo4j and FalkorDB as database backends. Use the `DATABASE_TYPE` environment variable to choose between them.
+### User & Workspace Configuration
+- `DEFAULT_GROUP_ID`: Optional namespace for organizing memories by workspace/project
+- `DEFAULT_USERNAME`: Optional user identifier for personalized memory storage
 
+### Database Configuration
 #### Neo4j Configuration (default)
 
 - `NEO4J_URI`: URI for the Neo4j database (default: `bolt://localhost:7687`)
@@ -97,6 +104,7 @@ The server supports both Neo4j and FalkorDB as database backends. Use the `DATAB
 - `FALKORDB_USERNAME`: FalkorDB username (optional)
 - `FALKORDB_PASSWORD`: FalkorDB password (optional)
 
+### LLM Configuration
 - `OPENAI_API_KEY`: OpenAI API key (required for LLM operations)
 - `OPENAI_BASE_URL`: Optional base URL for OpenAI API
 - `MODEL_NAME`: OpenAI model name to use for LLM operations.

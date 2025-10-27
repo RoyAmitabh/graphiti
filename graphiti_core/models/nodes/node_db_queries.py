@@ -24,7 +24,7 @@ def get_episode_node_save_query(provider: GraphProvider) -> str:
         case GraphProvider.NEPTUNE:
             return """
                 MERGE (n:Episodic {uuid: $uuid})
-                SET n = {uuid: $uuid, name: $name, group_id: $group_id, source_description: $source_description, source: $source, content: $content,
+                SET n = {uuid: $uuid, name: $name, group_id: $group_id, username: $username, source_description: $source_description, source: $source, content: $content,
                 entity_edges: join([x IN coalesce($entity_edges, []) | toString(x) ], '|'), created_at: $created_at, valid_at: $valid_at}
                 RETURN n.uuid AS uuid
             """
@@ -34,6 +34,7 @@ def get_episode_node_save_query(provider: GraphProvider) -> str:
                 SET
                     n.name = $name,
                     n.group_id = $group_id,
+                    n.username = $username,
                     n.created_at = $created_at,
                     n.source = $source,
                     n.source_description = $source_description,
@@ -45,14 +46,14 @@ def get_episode_node_save_query(provider: GraphProvider) -> str:
         case GraphProvider.FALKORDB:
             return """
                 MERGE (n:Episodic {uuid: $uuid})
-                SET n = {uuid: $uuid, name: $name, group_id: $group_id, source_description: $source_description, source: $source, content: $content,
+                SET n = {uuid: $uuid, name: $name, group_id: $group_id, username: $username, source_description: $source_description, source: $source, content: $content,
                 entity_edges: $entity_edges, created_at: $created_at, valid_at: $valid_at}
                 RETURN n.uuid AS uuid
             """
         case _:  # Neo4j
             return """
                 MERGE (n:Episodic {uuid: $uuid})
-                SET n = {uuid: $uuid, name: $name, group_id: $group_id, source_description: $source_description, source: $source, content: $content,
+                SET n = {uuid: $uuid, name: $name, group_id: $group_id, username: $username, source_description: $source_description, source: $source, content: $content,
                 entity_edges: $entity_edges, created_at: $created_at, valid_at: $valid_at}
                 RETURN n.uuid AS uuid
             """
@@ -64,7 +65,7 @@ def get_episode_node_save_bulk_query(provider: GraphProvider) -> str:
             return """
                 UNWIND $episodes AS episode
                 MERGE (n:Episodic {uuid: episode.uuid})
-                SET n = {uuid: episode.uuid, name: episode.name, group_id: episode.group_id, source_description: episode.source_description,
+                SET n = {uuid: episode.uuid, name: episode.name, group_id: episode.group_id, username: episode.username, source_description: episode.source_description,
                     source: episode.source, content: episode.content,
                 entity_edges: join([x IN coalesce(episode.entity_edges, []) | toString(x) ], '|'), created_at: episode.created_at, valid_at: episode.valid_at}
                 RETURN n.uuid AS uuid
@@ -75,6 +76,7 @@ def get_episode_node_save_bulk_query(provider: GraphProvider) -> str:
                 SET
                     n.name = $name,
                     n.group_id = $group_id,
+                    n.username = $username,
                     n.created_at = $created_at,
                     n.source = $source,
                     n.source_description = $source_description,
@@ -87,7 +89,7 @@ def get_episode_node_save_bulk_query(provider: GraphProvider) -> str:
             return """
                 UNWIND $episodes AS episode
                 MERGE (n:Episodic {uuid: episode.uuid})
-                SET n = {uuid: episode.uuid, name: episode.name, group_id: episode.group_id, source_description: episode.source_description, source: episode.source, content: episode.content, 
+                SET n = {uuid: episode.uuid, name: episode.name, group_id: episode.group_id, username: episode.username, source_description: episode.source_description, source: episode.source, content: episode.content, 
                 entity_edges: episode.entity_edges, created_at: episode.created_at, valid_at: episode.valid_at}
                 RETURN n.uuid AS uuid
             """
@@ -95,7 +97,7 @@ def get_episode_node_save_bulk_query(provider: GraphProvider) -> str:
             return """
                 UNWIND $episodes AS episode
                 MERGE (n:Episodic {uuid: episode.uuid})
-                SET n = {uuid: episode.uuid, name: episode.name, group_id: episode.group_id, source_description: episode.source_description, source: episode.source, content: episode.content, 
+                SET n = {uuid: episode.uuid, name: episode.name, group_id: episode.group_id, username: episode.username, source_description: episode.source_description, source: episode.source, content: episode.content, 
                 entity_edges: episode.entity_edges, created_at: episode.created_at, valid_at: episode.valid_at}
                 RETURN n.uuid AS uuid
             """
@@ -105,6 +107,7 @@ EPISODIC_NODE_RETURN = """
     e.uuid AS uuid,
     e.name AS name,
     e.group_id AS group_id,
+    e.username AS username,
     e.created_at AS created_at,
     e.source AS source,
     e.source_description AS source_description,
@@ -120,6 +123,7 @@ EPISODIC_NODE_RETURN_NEPTUNE = """
     e.uuid AS uuid,
     e.name AS name,
     e.group_id AS group_id,
+    e.username AS username,
     e.source_description AS source_description,
     e.source AS source,
     split(e.entity_edges, ",") AS entity_edges
@@ -133,7 +137,6 @@ def get_entity_node_save_query(provider: GraphProvider, labels: str, has_aoss: b
                 MERGE (n:Entity {{uuid: $entity_data.uuid}})
                 SET n:{labels}
                 SET n = $entity_data
-                SET n.name_embedding = vecf32($entity_data.name_embedding)
                 RETURN n.uuid AS uuid
             """
         case GraphProvider.KUZU:
@@ -142,6 +145,7 @@ def get_entity_node_save_query(provider: GraphProvider, labels: str, has_aoss: b
                 SET
                     n.name = $name,
                     n.group_id = $group_id,
+                    n.username = $username,
                     n.labels = $labels,
                     n.created_at = $created_at,
                     n.name_embedding = $name_embedding,
@@ -226,6 +230,7 @@ def get_entity_node_save_bulk_query(
                 SET
                     n.name = $name,
                     n.group_id = $group_id,
+                    n.username = $username,
                     n.labels = $labels,
                     n.created_at = $created_at,
                     n.name_embedding = $name_embedding,
@@ -260,6 +265,7 @@ def get_entity_node_return_query(provider: GraphProvider) -> str:
             n.uuid AS uuid,
             n.name AS name,
             n.group_id AS group_id,
+            n.username AS username,
             n.labels AS labels,
             n.created_at AS created_at,
             n.summary AS summary,
@@ -270,6 +276,7 @@ def get_entity_node_return_query(provider: GraphProvider) -> str:
         n.uuid AS uuid,
         n.name AS name,
         n.group_id AS group_id,
+        n.username AS username,
         n.created_at AS created_at,
         n.summary AS summary,
         labels(n) AS labels,
@@ -282,13 +289,13 @@ def get_community_node_save_query(provider: GraphProvider) -> str:
         case GraphProvider.FALKORDB:
             return """
                 MERGE (n:Community {uuid: $uuid})
-                SET n = {uuid: $uuid, name: $name, group_id: $group_id, summary: $summary, created_at: $created_at, name_embedding: vecf32($name_embedding)}
+                SET n = {uuid: $uuid, name: $name, group_id: $group_id, username: $username, summary: $summary, created_at: $created_at, name_embedding: vecf32($name_embedding)}
                 RETURN n.uuid AS uuid
             """
         case GraphProvider.NEPTUNE:
             return """
                 MERGE (n:Community {uuid: $uuid})
-                SET n = {uuid: $uuid, name: $name, group_id: $group_id, summary: $summary, created_at: $created_at}
+                SET n = {uuid: $uuid, name: $name, group_id: $group_id, username: $username, summary: $summary, created_at: $created_at}
                 SET n.name_embedding = join([x IN coalesce($name_embedding, []) | toString(x) ], ",")
                 RETURN n.uuid AS uuid
             """
@@ -298,6 +305,7 @@ def get_community_node_save_query(provider: GraphProvider) -> str:
                 SET
                     n.name = $name,
                     n.group_id = $group_id,
+                    n.username = $username,
                     n.created_at = $created_at,
                     n.name_embedding = $name_embedding,
                     n.summary = $summary
@@ -306,7 +314,7 @@ def get_community_node_save_query(provider: GraphProvider) -> str:
         case _:  # Neo4j
             return """
                 MERGE (n:Community {uuid: $uuid})
-                SET n = {uuid: $uuid, name: $name, group_id: $group_id, summary: $summary, created_at: $created_at}
+                SET n = {uuid: $uuid, name: $name, group_id: $group_id, username: $username, summary: $summary, created_at: $created_at}
                 WITH n CALL db.create.setNodeVectorProperty(n, "name_embedding", $name_embedding)
                 RETURN n.uuid AS uuid
             """
@@ -316,6 +324,7 @@ COMMUNITY_NODE_RETURN = """
     c.uuid AS uuid,
     c.name AS name,
     c.group_id AS group_id,
+    c.username AS username,
     c.created_at AS created_at,
     c.name_embedding AS name_embedding,
     c.summary AS summary
@@ -326,6 +335,7 @@ COMMUNITY_NODE_RETURN_NEPTUNE = """
     n.name AS name,
     [x IN split(n.name_embedding, ",") | toFloat(x)] AS name_embedding,
     n.group_id AS group_id,
+    n.username AS username,
     n.summary AS summary,
     n.created_at AS created_at
 """

@@ -195,6 +195,7 @@ async def build_community(
     community_node = CommunityNode(
         name=name,
         group_id=community_cluster[0].group_id,
+        username=community_cluster[0].username,
         labels=['Community'],
         created_at=now,
         summary=summary,
