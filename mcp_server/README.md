@@ -83,7 +83,11 @@ uv sync
 ## Configuration
 
 The server supports both Neo4j and FalkorDB as database backends. Use the `DATABASE_TYPE` environment variable to choose between them.
+### User & Workspace Configuration
+- `DEFAULT_GROUP_ID`: Optional namespace for organizing memories by workspace/project
+- `DEFAULT_USERNAME`: Optional user identifier for personalized memory storage
 
+### Database Configuration
 #### Neo4j Configuration (default)
 
 - `NEO4J_URI`: URI for the Neo4j database (default: `bolt://localhost:7687`)
@@ -97,6 +101,7 @@ The server supports both Neo4j and FalkorDB as database backends. Use the `DATAB
 - `FALKORDB_USERNAME`: FalkorDB username (optional)
 - `FALKORDB_PASSWORD`: FalkorDB password (optional)
 
+### LLM Configuration
 - `OPENAI_API_KEY`: OpenAI API key (required for LLM operations)
 - `OPENAI_BASE_URL`: Optional base URL for OpenAI API
 - `MODEL_NAME`: OpenAI model name to use for LLM operations.
