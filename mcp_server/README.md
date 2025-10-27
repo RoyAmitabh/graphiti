@@ -57,15 +57,18 @@ cd graphiti && pwd
 
 `docker compose up`
 
+2.1. or start the service using command `python3 graphiti_mcp_server.py --transport sse`
+
 3. Point your MCP client to `http://localhost:8000/sse`
 
 ## Installation
 
 ### Prerequisites
 
-1. Ensure you have Python 3.10 or higher installed.
-2. A running Neo4j database (version 5.26 or later required)
-3. OpenAI API key for LLM operations
+1. Ensure you have Python 3.11.13 or higher installed.
+2. A running Neo4j database (version 6.0.2 or later required).
+3. Install the libraries mentioned in requirements.txt file under mcp_server directory.
+4. OpenAI API key for LLM operations.
 
 ### Setup
 
