@@ -1,3 +1,41 @@
+---
+alwaysApply: true
+---
+# Read from DEFAULT_GROUP_ID and DEFAULT_USERNAME env vars
+
+## 👤 User & Group Configuration (CRITICAL - READ FIRST)
+
+**⚠️ IMPORTANT FOR MULTI-USER CENTRALIZED SERVER:**
+
+The MCP server is a **centralized service** shared by multiple users. Each user has their own workspace (group_id) and identity (username) configured in their local `mcp.json`:
+
+- **`DEFAULT_GROUP_ID`**: Namespace for organizing memories by workspace/project 
+- **`DEFAULT_USERNAME`**: User identifier for personalized memory storage 
+
+**🚨 CRITICAL RULE: ALWAYS Pass These Parameters**
+
+Since this is an SSE (remote) server, you **MUST explicitly pass** `username` and `group_id` in EVERY tool call:
+- `add_memory_and_wait(username="", group_id="", ...)`
+- `search_memory_facts(group_ids=[""], ...)`
+- `search_memory_nodes(group_ids=[""], ...)`
+
+
+**Example mcp.json configuration (for reference):**
+```json
+{
+  "mcpServers": {
+    "graphiti-memory": {
+      "transport": "sse",
+      "url": "http://127.0.0.1:8000/sse",
+      "env": {
+        "DEFAULT_GROUP_ID": "",
+        "DEFAULT_USERNAME": ""
+      }
+    }
+  }
+}
+```
+
 ## Instructions for Using Graphiti's MCP Tools for Agent Memory
 
 ### Before Starting Any Task
