@@ -196,6 +196,7 @@ async def extract_nodes(
         new_node = EntityNode(
             name=extracted_entity.name,
             group_id=episode.group_id,
+            username=episode.username,
             labels=labels,
             summary='',
             created_at=utc_now(),
