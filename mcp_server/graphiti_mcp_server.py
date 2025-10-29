@@ -55,7 +55,7 @@ class HuggingFaceEmbedderConfig(EmbedderConfig):
     """Configuration for Hugging Face embedder."""
     model_name: str = os.getenv('HUGGINGFACE_MODEL_NAME', "sentence-transformers/all-MiniLM-L6-v2")
     device: str = os.getenv('HUGGINGFACE_DEVICE',"cpu")
-    max_length: int(os.getenv('HUGGINGFACE_EMBEDDING_DIM'))
+    max_length: int = (os.getenv('HUGGINGFACE_EMBEDDING_DIM'))
 
 
 class HuggingFaceEmbedder(EmbedderClient):
