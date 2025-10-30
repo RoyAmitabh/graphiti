@@ -115,14 +115,39 @@ class BaseOpenAIClient(LLMClient):
 
     def _handle_structured_response(self, response: Any) -> dict[str, Any]:
         """Handle structured response parsing and validation."""
-        response_object = response.output_text
-
-        if response_object:
-            return json.loads(response_object)
-        elif response_object.refusal:
-            raise RefusalError(response_object.refusal)
+        # Handle different response formats
+        if hasattr(response, 'output_text'):
+            # Standard OpenAI response
+            response_object = response.output_text
+            if response_object:
+                return json.loads(response_object)
+            elif hasattr(response, 'refusal') and response.refusal:
+                raise RefusalError(response.refusal)
+            else:
+                raise Exception(f'Invalid response from LLM: {response}')
+                
+        elif hasattr(response, 'choices') and len(response.choices) > 0:
+            # Azure OpenAI ParsedChatCompletion response
+            choice = response.choices[0]
+            if hasattr(choice, 'message') and hasattr(choice.message, 'parsed'):
+                # Return the parsed object directly as a dict
+                parsed = choice.message.parsed
+                if parsed:
+                    return parsed.model_dump() if hasattr(parsed, 'model_dump') else parsed
+                elif hasattr(choice.message, 'refusal') and choice.message.refusal:
+                    raise RefusalError(choice.message.refusal)
+                else:
+                    raise Exception(f'Invalid response from LLM: {response}')
+            elif hasattr(choice, 'message') and hasattr(choice.message, 'content'):
+                content = choice.message.content
+                if content:
+                    return json.loads(content)
+                else:
+                    raise Exception(f'Empty content in response: {response}')
+            else:
+                raise Exception(f'Invalid response structure: {response}')
         else:
-            raise Exception(f'Invalid response from LLM: {response_object.model_dump()}')
+            raise Exception(f'Unknown response format: {response}')
 
     def _handle_json_response(self, response: Any) -> dict[str, Any]:
         """Handle JSON response parsing."""
