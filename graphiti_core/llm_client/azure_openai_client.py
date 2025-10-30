@@ -49,8 +49,15 @@ class AzureOpenAILLMClient(BaseOpenAIClient):
         temperature: float | None,
         max_tokens: int,
         response_model: type[BaseModel],
+        reasoning: str | None = None,
+        verbosity: str | None = None,
     ):
-        """Create a structured completion using Azure OpenAI's beta parse API."""
+        """Create a structured completion using Azure OpenAI's beta parse API.
+        
+        Note: reasoning and verbosity parameters are accepted for compatibility
+        with BaseOpenAIClient but are not used as they're not supported by
+        Azure OpenAI API.
+        """
         return await self.client.beta.chat.completions.parse(
             model=model,
             messages=messages,
