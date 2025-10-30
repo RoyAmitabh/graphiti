@@ -1498,10 +1498,15 @@ async def initialize_server() -> MCPConfig:
     # Initialize Graphiti
     await initialize_graphiti()
 
-    if args.host:
-        logger.info(f'Setting MCP server host to: {args.host}')
+    host = os.environ.get('MCP_SERVER_HOST')
+    if host:
+        logger.info(f'Setting MCP server host to: {host}')
         # Set MCP server host from CLI or env
-        mcp.settings.host = args.host
+        mcp.settings.host = host
+    port = os.environ.get('MCP_SERVER_PORT')
+    if port:
+        logger.info(f"setting port to: {port}")
+        mcp.settings.port = int(port)
 
     # Return MCP configuration
     return MCPConfig.from_cli(args)
